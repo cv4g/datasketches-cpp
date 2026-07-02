@@ -108,38 +108,6 @@ uint8_t count_min_sketch<W,A>::suggest_num_hashes(double confidence) {
 }
 
 template<typename W, typename A>
-std::vector<uint64_t> count_min_sketch<W,A>::get_hashes(const void* item, size_t size) const {
-  /*
-   * Returns the hash locations for the input item using the original hashing
-   * scheme from [1].
-   * Generate _num_hashes separate hashes from calls to murmurmhash.
-   * This could be optimized by keeping both of the 64bit parts of the hash
-   * function, rather than generating a new one for every level.
-   *
-   *
-   * Postscript.
-   * Note that a tradeoff can be achieved over the update time and space
-   * complexity of the sketch by using a combinatorial hashing scheme from
-   * https://github.com/Claudenw/BloomFilter/wiki/Bloom-Filters----An-overview
-   * https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
-   */
-  uint64_t bucket_index;
-  std::vector<uint64_t> sketch_update_locations;
-  sketch_update_locations.reserve(_num_hashes);
-
-  uint64_t hash_seed_index = 0;
-  for (const auto &it: hash_seeds) {
-    HashState hashes;
-    MurmurHash3_x64_128(item, size, it, hashes); // ? BEWARE OVERFLOW.
-    uint64_t hash = hashes.h1;
-    bucket_index = hash % _num_buckets;
-    sketch_update_locations.push_back((hash_seed_index * _num_buckets) + bucket_index);
-    hash_seed_index += 1;
-  }
-  return sketch_update_locations;
-}
-
-template<typename W, typename A>
 W count_min_sketch<W,A>::get_estimate(uint64_t item) const {return get_estimate(&item, sizeof(item));}
 
 template<typename W, typename A>
@@ -154,14 +122,19 @@ W count_min_sketch<W,A>::get_estimate(const std::string& item) const {
 template<typename W, typename A>
 W count_min_sketch<W,A>::get_estimate(const void* item, size_t size) const {
   /*
-   * Returns the estimated frequency of the item
+   * Returns the estimated frequency of the item.
+   * Compute hash locations directly to avoid temporary allocations.
    */
-  std::vector<uint64_t> hash_locations = get_hashes(item, size);
-  std::vector<W> estimates;
-  for (const auto h: hash_locations) {
-    estimates.push_back(_sketch_array[h]);
+  W estimate = std::numeric_limits<W>::max();
+  uint64_t hash_seed_index = 0;
+  for (const auto &it: hash_seeds) {
+    HashState hashes;
+    MurmurHash3_x64_128(item, size, it, hashes); // ? BEWARE OVERFLOW.
+    const uint64_t bucket_index = hashes.h1 % _num_buckets;
+    estimate = std::min(estimate, _sketch_array[(hash_seed_index * _num_buckets) + bucket_index]);
+    hash_seed_index += 1;
   }
-  return *std::min_element(estimates.begin(), estimates.end());
+  return estimate;
 }
 
 template<typename W, typename A>
@@ -183,13 +156,18 @@ void count_min_sketch<W,A>::update(const std::string& item, W weight) {
 template<typename W, typename A>
 void count_min_sketch<W,A>::update(const void* item, size_t size, W weight) {
   /*
-   * Gets the item's hash locations and then increments the sketch in those
-   * locations by the weight.
+   * Compute each hash location and increment it directly. This function is on
+   * hot ingestion paths, so avoid materializing temporary vectors.
    */
   _total_weight += weight >= 0 ? weight : -weight;
-  std::vector<uint64_t> hash_locations = get_hashes(item, size);
-  for (const auto h: hash_locations) {
-    _sketch_array[h] += weight;
+
+  uint64_t hash_seed_index = 0;
+  for (const auto &it: hash_seeds) {
+    HashState hashes;
+    MurmurHash3_x64_128(item, size, it, hashes); // ? BEWARE OVERFLOW.
+    const uint64_t bucket_index = hashes.h1 % _num_buckets;
+    _sketch_array[(hash_seed_index * _num_buckets) + bucket_index] += weight;
+    hash_seed_index += 1;
   }
 }
 
