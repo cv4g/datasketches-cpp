@@ -27,6 +27,8 @@
 #include <random>
 #include <chrono>
 #include <thread>
+#include <type_traits>
+#include <utility>
 
 /// DataSketches namespace
 namespace datasketches {
@@ -51,6 +53,54 @@ namespace random_utils {
 
   inline void override_seed(uint64_t s) {
     rand.seed(s);
+  }
+}
+
+template<typename... Ts> struct make_void { using type = void; };
+
+/**
+ * C++11 version of the UniformRandomBitGenerator requirements of the standard library,
+ * which C++20 expresses as std::uniform_random_bit_generator plus G::result_type:
+ * G::result_type is an unsigned integer type, G::min() and G::max() are constant expressions of that type
+ * with G::min() < G::max(), and invoking a non-const G returns G::result_type.
+ * The standard engines, such as std::mt19937_64, meet these requirements.
+ */
+template<typename G, typename = void>
+struct is_uniform_random_bit_generator: std::false_type {};
+
+template<typename G>
+struct is_uniform_random_bit_generator<G, typename make_void<
+    typename G::result_type,
+    decltype(std::declval<G&>()()),
+    std::integral_constant<typename G::result_type, G::min()>, // fails unless G::min() is a constant expression
+    std::integral_constant<typename G::result_type, G::max()>
+  >::type>: std::integral_constant<bool,
+    std::is_unsigned<typename G::result_type>::value
+    && !std::is_same<typename std::remove_cv<typename G::result_type>::type, bool>::value
+    && std::is_same<decltype(std::declval<G&>()()), typename G::result_type>::value
+    && std::is_same<decltype(G::min()), typename G::result_type>::value
+    && std::is_same<decltype(G::max()), typename G::result_type>::value
+    && (G::min() < G::max())
+  > {};
+
+/**
+ * Returns a fair random bit from a uniform random bit generator.
+ * The bit depends only on the generator output, unlike std::bernoulli_distribution,
+ * so a given generator state gives the same bits with any standard library.
+ * The bit tells whether the output is in the upper half of the range, since the high bits
+ * of some engines are better than the low bits. If the range has an odd number of values,
+ * the largest value is skipped, so the generator can be invoked more than once.
+ * With a range of {0, 1}, the bit is the output.
+ */
+template<typename G>
+bool random_bit_from(G& generator) {
+  static_assert(is_uniform_random_bit_generator<G>::value, "G must be a uniform random bit generator");
+  using U = typename G::result_type;
+  const U span = static_cast<U>(G::max() - G::min()); // number of values - 1
+  const U last = static_cast<U>(span - 1 + span % 2); // largest accepted offset: an even number of values from 0
+  for (;;) {
+    const U offset = static_cast<U>(generator() - G::min());
+    if (offset <= last) return offset > last / 2;
   }
 }
 
