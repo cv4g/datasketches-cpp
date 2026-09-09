@@ -238,6 +238,16 @@ class kll_sketch {
     void update(FwdT&& item);
 
     /**
+     * Updates this sketch with the given data item using caller-owned randomness.
+     * The generator state is not owned or serialized by the sketch.
+     * The generator is invoked only when a compaction needs one random bit.
+     * @param item from a stream of items
+     * @param random_bit_generator callable that returns a value convertible to bool
+     */
+    template<typename FwdT, typename RandomBitGenerator>
+    void update(FwdT&& item, RandomBitGenerator& random_bit_generator);
+
+    /**
      * Merges another sketch into this one.
      * If sketches contain strings, callers are responsible for ensuring that
      * both sketches were built using compatible string encodings.
@@ -245,6 +255,16 @@ class kll_sketch {
      */
     template<typename FwdSk>
     void merge(FwdSk&& other);
+
+    /**
+     * Merges another sketch into this one using caller-owned randomness.
+     * The generator state is not owned or serialized by the sketch.
+     * The generator is invoked only when a compaction needs one random bit.
+     * @param other sketch to merge into this one
+     * @param random_bit_generator callable that returns a value convertible to bool
+     */
+    template<typename FwdSk, typename RandomBitGenerator>
+    void merge(FwdSk&& other, RandomBitGenerator& random_bit_generator);
 
     /**
      * Returns true if this sketch is empty.
@@ -572,17 +592,20 @@ class kll_sketch {
 
     // common update code
     inline void update_min_max(const T& item);
-    inline uint32_t internal_update();
+    template<typename RandomBitGenerator>
+    inline uint32_t internal_update(RandomBitGenerator& random_bit_generator);
 
     // The following code is only valid in the special case of exactly reaching capacity while updating.
     // It cannot be used while merging, while reducing k, or anything else.
-    void compress_while_updating(void);
+    template<typename RandomBitGenerator>
+    void compress_while_updating(RandomBitGenerator& random_bit_generator);
 
     uint8_t find_level_to_compact() const;
     void add_empty_top_level_to_completely_full_sketch();
     void sort_level_zero();
 
-    template<typename O> void merge_higher_levels(O&& other, uint64_t final_n);
+    template<typename O, typename RandomBitGenerator>
+    void merge_higher_levels(O&& other, uint64_t final_n, RandomBitGenerator& random_bit_generator);
 
     template<typename FwdSk>
     void populate_work_arrays(FwdSk&& other, T* workbuf, uint32_t* worklevels, uint8_t provisional_num_levels);

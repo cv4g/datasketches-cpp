@@ -18,6 +18,7 @@
  */
 
 #include <catch2/catch.hpp>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -42,6 +43,22 @@ static std::string testBinaryInputPath = "test/";
 using kll_float_sketch = kll_sketch<float, std::less<float>, test_allocator<float>>;
 // let std::string use the default allocator for simplicity, otherwise we need to define "less" and "serde"
 using kll_string_sketch = kll_sketch<std::string, std::less<std::string>, test_allocator<std::string>>;
+
+class deterministic_random_bit_generator {
+public:
+  explicit deterministic_random_bit_generator(uint64_t state): state_(state) {}
+
+  bool operator()() {
+    state_ += UINT64_C(0x9e3779b97f4a7c15);
+    uint64_t value = state_;
+    value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return ((value ^ (value >> 31)) >> 63) != 0;
+  }
+
+private:
+  uint64_t state_;
+};
 
 TEST_CASE("kll sketch", "[kll_sketch]") {
 
@@ -240,6 +257,37 @@ TEST_CASE("kll sketch", "[kll_sketch]") {
         }
       }
     }
+  }
+
+  SECTION("caller-owned randomness") {
+    auto build = [](uint64_t seed) {
+      kll_float_sketch sketch(200, std::less<float>(), 0);
+      deterministic_random_bit_generator random_bit(seed);
+      for (uint32_t i = 0; i < 10000; ++i) sketch.update(static_cast<float>(i), random_bit);
+      return sketch.serialize();
+    };
+
+    REQUIRE(build(1) == build(1));
+#ifndef KLL_VALIDATION // validation mode replaces the generator with deterministic offsets
+    REQUIRE(build(1) != build(2));
+#endif
+
+    kll_float_sketch left(200, std::less<float>(), 0);
+    kll_float_sketch right(200, std::less<float>(), 0);
+    deterministic_random_bit_generator left_random_bit(3);
+    deterministic_random_bit_generator right_random_bit(4);
+    for (uint32_t i = 0; i < 5000; ++i) left.update(static_cast<float>(i), left_random_bit);
+    for (uint32_t i = 5000; i < 10000; ++i) right.update(static_cast<float>(i), right_random_bit);
+
+    kll_float_sketch first_merge(200, std::less<float>(), 0);
+    kll_float_sketch second_merge(200, std::less<float>(), 0);
+    deterministic_random_bit_generator first_merge_random_bit(5);
+    deterministic_random_bit_generator second_merge_random_bit(5);
+    first_merge.merge(left, first_merge_random_bit);
+    first_merge.merge(right, first_merge_random_bit);
+    second_merge.merge(left, second_merge_random_bit);
+    second_merge.merge(right, second_merge_random_bit);
+    REQUIRE(first_merge.serialize() == second_merge.serialize());
   }
 
   SECTION("stream serialize deserialize empty") {
