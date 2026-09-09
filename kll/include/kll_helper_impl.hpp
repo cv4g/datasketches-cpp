@@ -92,14 +92,15 @@ uint64_t kll_helper::sum_the_sample_weights(uint8_t num_levels, const uint32_t* 
   return total;
 }
 
-template <typename T>
-void kll_helper::randomly_halve_down(T* buf, uint32_t start, uint32_t length) {
+template <typename T, typename RandomBitGenerator>
+void kll_helper::randomly_halve_down(T* buf, uint32_t start, uint32_t length, RandomBitGenerator& random_bit_generator) {
   if (!is_even(length)) throw std::invalid_argument("length must be even");
   const uint32_t half_length = length / 2;
 #ifdef KLL_VALIDATION
+  unused(random_bit_generator);
   const uint32_t offset = deterministic_offset();
 #else
-  const uint32_t offset = random_utils::random_bit();
+  const uint32_t offset = random_bit_generator() ? 1 : 0;
 #endif
   uint32_t j = start + offset;
   for (uint32_t i = start; i < (start + half_length); i++) {
@@ -108,14 +109,15 @@ void kll_helper::randomly_halve_down(T* buf, uint32_t start, uint32_t length) {
   }
 }
 
-template <typename T>
-void kll_helper::randomly_halve_up(T* buf, uint32_t start, uint32_t length) {
+template <typename T, typename RandomBitGenerator>
+void kll_helper::randomly_halve_up(T* buf, uint32_t start, uint32_t length, RandomBitGenerator& random_bit_generator) {
   if (!is_even(length)) throw std::invalid_argument("length must be even");
   const uint32_t half_length = length / 2;
 #ifdef KLL_VALIDATION
+  unused(random_bit_generator);
   const uint32_t offset = deterministic_offset();
 #else
-  const uint32_t offset = random_utils::random_bit();
+  const uint32_t offset = random_bit_generator() ? 1 : 0;
 #endif
   uint32_t j = (start + length) - 1 - offset;
   for (uint32_t i = (start + length) - 1; i >= (start + half_length); i--) {
@@ -202,9 +204,9 @@ void kll_helper::merge_sorted_arrays(const T* buf_a, uint32_t start_a, uint32_t 
  * sorted afterwards.
  * Level zero is not required to be sorted before, and may not be sorted afterwards.
  */
-template <typename T, typename C>
+template <typename T, typename C, typename RandomBitGenerator>
 kll_helper::compress_result kll_helper::general_compress(uint16_t k, uint8_t m, uint8_t num_levels_in, T* items,
-        uint32_t* in_levels, uint32_t* out_levels, bool is_level_zero_sorted)
+        uint32_t* in_levels, uint32_t* out_levels, bool is_level_zero_sorted, RandomBitGenerator& random_bit_generator)
 {
   if (num_levels_in == 0) throw std::invalid_argument("num_levels_in == 0"); // things are too weird if zero levels are allowed
   const uint32_t starting_item_count = in_levels[num_levels_in] - in_levels[0];
@@ -257,9 +259,9 @@ kll_helper::compress_result kll_helper::general_compress(uint16_t k, uint8_t m, 
       }
 
       if (pop_above == 0) { // Level above is empty, so halve up
-        randomly_halve_up(items, adj_beg, adj_pop);
+        randomly_halve_up(items, adj_beg, adj_pop, random_bit_generator);
       } else { // Level above is nonempty, so halve down, then merge up
-        randomly_halve_down(items, adj_beg, adj_pop);
+        randomly_halve_down(items, adj_beg, adj_pop, random_bit_generator);
         merge_sorted_arrays<T, C>(items, adj_beg, half_adj_pop, raw_lim, pop_above, adj_beg + half_adj_pop);
       }
 

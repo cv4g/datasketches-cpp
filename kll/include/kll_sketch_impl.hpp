@@ -26,7 +26,6 @@
 #include <stdexcept>
 
 #include "conditional_forward.hpp"
-#include "count_zeros.hpp"
 #include "memory_operations.hpp"
 #include "kll_helper.hpp"
 
@@ -178,9 +177,16 @@ sorted_view_(nullptr)
 template<typename T, typename C, typename A>
 template<typename FwdT>
 void kll_sketch<T, C, A>::update(FwdT&& item) {
+  update(std::forward<FwdT>(item), random_utils::random_bit);
+}
+
+template<typename T, typename C, typename A>
+template<typename FwdT, typename RandomBitGenerator>
+void kll_sketch<T, C, A>::update(FwdT&& item, RandomBitGenerator& random_bit_generator) {
   if (!check_update_item(item)) { return; }
+  if (n_ == kll_constants::MAX_N) throw std::overflow_error("maximum stream length exceeded");
   update_min_max(static_cast<const T&>(item)); // min and max are always copies
-  const uint32_t index = internal_update();
+  const uint32_t index = internal_update(random_bit_generator);
   new (&items_[index]) T(std::forward<FwdT>(item));
   reset_sorted_view();
 }
@@ -197,8 +203,9 @@ void kll_sketch<T, C, A>::update_min_max(const T& item) {
 }
 
 template<typename T, typename C, typename A>
-uint32_t kll_sketch<T, C, A>::internal_update() {
-  if (levels_[0] == 0) compress_while_updating();
+template<typename RandomBitGenerator>
+uint32_t kll_sketch<T, C, A>::internal_update(RandomBitGenerator& random_bit_generator) {
+  if (levels_[0] == 0) compress_while_updating(random_bit_generator);
   n_++;
   is_level_zero_sorted_ = false;
   return --levels_[0];
@@ -207,10 +214,17 @@ uint32_t kll_sketch<T, C, A>::internal_update() {
 template<typename T, typename C, typename A>
 template<typename FwdSk>
 void kll_sketch<T, C, A>::merge(FwdSk&& other) {
+  merge(std::forward<FwdSk>(other), random_utils::random_bit);
+}
+
+template<typename T, typename C, typename A>
+template<typename FwdSk, typename RandomBitGenerator>
+void kll_sketch<T, C, A>::merge(FwdSk&& other, RandomBitGenerator& random_bit_generator) {
   if (other.is_empty()) return;
   if (m_ != other.m_) {
     throw std::invalid_argument("incompatible M: " + std::to_string(m_) + " and " + std::to_string(other.m_));
   }
+  if (other.n_ > kll_constants::MAX_N - n_) throw std::overflow_error("maximum stream length exceeded");
   if (is_empty()) {
     min_item_.emplace(conditional_forward<FwdSk>(*other.min_item_));
     max_item_.emplace(conditional_forward<FwdSk>(*other.max_item_));
@@ -220,10 +234,10 @@ void kll_sketch<T, C, A>::merge(FwdSk&& other) {
   }
   const uint64_t final_n = n_ + other.n_;
   for (uint32_t i = other.levels_[0]; i < other.levels_[1]; i++) {
-    const uint32_t index = internal_update();
+    const uint32_t index = internal_update(random_bit_generator);
     new (&items_[index]) T(conditional_forward<FwdSk>(other.items_[i]));
   }
-  if (other.num_levels_ >= 2) merge_higher_levels(other, final_n);
+  if (other.num_levels_ >= 2) merge_higher_levels(other, final_n, random_bit_generator);
   n_ = final_n;
   if (other.is_estimation_mode()) min_k_ = std::min(min_k_, other.min_k_);
   assert_correct_total_weight();
@@ -346,6 +360,11 @@ size_t kll_sketch<T, C, A>::get_serialized_size_bytes(const SerDe& sd) const {
 template<typename T, typename C, typename A>
 template<typename TT, typename std::enable_if<std::is_arithmetic<TT>::value, int>::type>
 size_t kll_sketch<T, C, A>::get_max_serialized_size_bytes(uint16_t k, uint64_t n) {
+  if (k < kll_constants::MIN_K || k > kll_constants::MAX_K) throw std::invalid_argument("K must be >= "
+      + std::to_string(kll_constants::MIN_K) + " and <= " + std::to_string(kll_constants::MAX_K)
+      + ": " + std::to_string(k));
+  if (n > kll_constants::MAX_N) throw std::invalid_argument("N must be <= " + std::to_string(kll_constants::MAX_N)
+      + ": " + std::to_string(n));
   const uint8_t num_levels = kll_helper::ub_on_num_levels(n);
   const uint32_t max_num_retained = kll_helper::compute_total_capacity(k, kll_constants::DEFAULT_M, num_levels);
   // the last integer in the levels_ array is not serialized because it can be derived
@@ -356,6 +375,11 @@ size_t kll_sketch<T, C, A>::get_max_serialized_size_bytes(uint16_t k, uint64_t n
 template<typename T, typename C, typename A>
 template<typename TT, typename std::enable_if<!std::is_arithmetic<TT>::value, int>::type>
 size_t kll_sketch<T, C, A>::get_max_serialized_size_bytes(uint16_t k, uint64_t n, size_t max_item_size_bytes) {
+  if (k < kll_constants::MIN_K || k > kll_constants::MAX_K) throw std::invalid_argument("K must be >= "
+      + std::to_string(kll_constants::MIN_K) + " and <= " + std::to_string(kll_constants::MAX_K)
+      + ": " + std::to_string(k));
+  if (n > kll_constants::MAX_N) throw std::invalid_argument("N must be <= " + std::to_string(kll_constants::MAX_N)
+      + ": " + std::to_string(n));
   const uint8_t num_levels = kll_helper::ub_on_num_levels(n);
   const uint32_t max_num_retained = kll_helper::compute_total_capacity(k, kll_constants::DEFAULT_M, num_levels);
   // the last integer in the levels_ array is not serialized because it can be derived
@@ -448,13 +472,10 @@ kll_sketch<T, C, A> kll_sketch<T, C, A>::deserialize(std::istream& is, const Ser
   const auto k = read<uint16_t>(is);
   const auto m = read<uint8_t>(is);
   read<uint8_t>(is); // skip unused byte
-
-  check_m(m);
-  check_preamble_ints(preamble_ints, flags_byte);
-  check_serial_version(serial_version);
-  check_family_id(family_id);
-
   if (!is.good()) throw std::runtime_error("error reading from std::istream");
+
+  check_header(preamble_ints, serial_version, family_id, flags_byte, k, m);
+
   const bool is_empty(flags_byte & (1 << flags::IS_EMPTY));
   if (is_empty) return kll_sketch(k, comparator, allocator);
 
@@ -471,43 +492,45 @@ kll_sketch<T, C, A> kll_sketch<T, C, A>::deserialize(std::istream& is, const Ser
     min_k = read<uint16_t>(is);
     num_levels = read<uint8_t>(is);
     read<uint8_t>(is); // skip unused byte
+    if (!is.good()) throw std::runtime_error("error reading from std::istream");
   }
   vector_u32 levels(num_levels + 1, 0, allocator);
-  const uint32_t capacity(kll_helper::compute_total_capacity(k, m, num_levels));
   if (is_single_item) {
-    levels[0] = capacity - 1;
+    levels[0] = kll_helper::compute_total_capacity(k, m, num_levels) - 1;
   } else {
     // the last integer in levels_ is not serialized because it can be derived
     read(is, levels.data(), sizeof(levels[0]) * num_levels);
+    if (!is.good()) throw std::runtime_error("error reading from std::istream");
   }
-  levels[num_levels] = capacity;
-  optional<T> tmp; // space to deserialize min and max
+  const uint32_t capacity = validate_levels(k, m, n, min_k, num_levels, levels);
+  alignas(T) char tmp_storage[sizeof(T)]; // uninitialized space for serde to construct min and max
+  T* tmp = reinterpret_cast<T*>(tmp_storage);
   optional<T> min_item;
   optional<T> max_item;
   if (!is_single_item) {
-    sd.deserialize(is, &*tmp, 1);
+    sd.deserialize(is, tmp, 1);
     // serde call did not throw, repackage and cleanup
     min_item.emplace(*tmp);
-    (*tmp).~T();
-    sd.deserialize(is, &*tmp, 1);
+    tmp->~T();
+    sd.deserialize(is, tmp, 1);
     // serde call did not throw, repackage and cleanup
     max_item.emplace(*tmp);
-    (*tmp).~T();
+    tmp->~T();
   }
   A alloc(allocator);
   auto items_buffer_deleter = [capacity, &alloc](T* ptr) { alloc.deallocate(ptr, capacity); };
   std::unique_ptr<T, decltype(items_buffer_deleter)> items_buffer(alloc.allocate(capacity), items_buffer_deleter);
   const auto num_items = levels[num_levels] - levels[0];
   sd.deserialize(is, &items_buffer.get()[levels[0]], num_items);
-  // serde call did not throw, repackage with destrtuctors
+  // serde call did not throw, repackage with destructors
   std::unique_ptr<T, items_deleter> items(items_buffer.release(), items_deleter(levels[0], capacity, allocator));
   const bool is_level_zero_sorted = (flags_byte & (1 << flags::IS_LEVEL_ZERO_SORTED)) > 0;
   if (is_single_item) {
     min_item.emplace(items.get()[levels[0]]);
     max_item.emplace(items.get()[levels[0]]);
   }
-  if (!is.good())
-    throw std::runtime_error("error reading from std::istream");
+  if (!is.good()) throw std::runtime_error("error reading from std::istream");
+  validate_items(levels, num_levels, items.get(), min_item, max_item, is_level_zero_sorted, comparator);
   return kll_sketch(k, min_k, n, num_levels, std::move(levels), std::move(items), capacity,
       std::move(min_item), std::move(max_item), is_level_zero_sorted, comparator);
 }
@@ -518,6 +541,7 @@ kll_sketch<T, C, A> kll_sketch<T, C, A>::deserialize(const void* bytes, size_t s
     const C& comparator, const A& allocator) {
   ensure_minimum_memory(size, 8);
   const char* ptr = static_cast<const char*>(bytes);
+  const char* end_ptr = ptr + size;
   uint8_t preamble_ints;
   ptr += copy_from_mem(ptr, preamble_ints);
   uint8_t serial_version;
@@ -532,20 +556,20 @@ kll_sketch<T, C, A> kll_sketch<T, C, A>::deserialize(const void* bytes, size_t s
   ptr += copy_from_mem(ptr, m);
   ptr += sizeof(uint8_t); // skip unused byte
 
-  check_m(m);
-  check_preamble_ints(preamble_ints, flags_byte);
-  check_serial_version(serial_version);
-  check_family_id(family_id);
+  check_header(preamble_ints, serial_version, family_id, flags_byte, k, m);
   ensure_minimum_memory(size, preamble_ints * sizeof(uint32_t));
 
   const bool is_empty(flags_byte & (1 << flags::IS_EMPTY));
-  if (is_empty) return kll_sketch(k, comparator, allocator);
+  if (is_empty) {
+    if (size != EMPTY_SIZE_BYTES) throw std::logic_error("deserialized size mismatch: "
+        + std::to_string(EMPTY_SIZE_BYTES) + " != " + std::to_string(size));
+    return kll_sketch(k, comparator, allocator);
+  }
 
   uint64_t n;
   uint16_t min_k;
   uint8_t num_levels;
   const bool is_single_item(flags_byte & (1 << flags::IS_SINGLE_ITEM)); // used in serial version 2
-  const char* end_ptr = static_cast<const char*>(bytes) + size;
   if (is_single_item) {
     n = 1;
     min_k = k;
@@ -557,33 +581,34 @@ kll_sketch<T, C, A> kll_sketch<T, C, A>::deserialize(const void* bytes, size_t s
     ptr += sizeof(uint8_t); // skip unused byte
   }
   vector_u32 levels(num_levels + 1, 0, allocator);
-  const uint32_t capacity(kll_helper::compute_total_capacity(k, m, num_levels));
   if (is_single_item) {
-    levels[0] = capacity - 1;
+    levels[0] = kll_helper::compute_total_capacity(k, m, num_levels) - 1;
   } else {
     // the last integer in levels_ is not serialized because it can be derived
+    ensure_minimum_memory(end_ptr - ptr, sizeof(levels[0]) * num_levels);
     ptr += copy_from_mem(ptr, levels.data(), sizeof(levels[0]) * num_levels);
   }
-  levels[num_levels] = capacity;
-  optional<T> tmp; // space to deserialize min and max
+  const uint32_t capacity = validate_levels(k, m, n, min_k, num_levels, levels);
+  alignas(T) char tmp_storage[sizeof(T)]; // uninitialized space for serde to construct min and max
+  T* tmp = reinterpret_cast<T*>(tmp_storage);
   optional<T> min_item;
   optional<T> max_item;
   if (!is_single_item) {
-    ptr += sd.deserialize(ptr, end_ptr - ptr, &*tmp, 1);
+    ptr += sd.deserialize(ptr, end_ptr - ptr, tmp, 1);
     // serde call did not throw, repackage and cleanup
     min_item.emplace(*tmp);
-    (*tmp).~T();
-    ptr += sd.deserialize(ptr, end_ptr - ptr, &*tmp, 1);
+    tmp->~T();
+    ptr += sd.deserialize(ptr, end_ptr - ptr, tmp, 1);
     // serde call did not throw, repackage and cleanup
     max_item.emplace(*tmp);
-    (*tmp).~T();
+    tmp->~T();
   }
   A alloc(allocator);
   auto items_buffer_deleter = [capacity, &alloc](T* ptr) { alloc.deallocate(ptr, capacity); };
   std::unique_ptr<T, decltype(items_buffer_deleter)> items_buffer(alloc.allocate(capacity), items_buffer_deleter);
   const auto num_items = levels[num_levels] - levels[0];
   ptr += sd.deserialize(ptr, end_ptr - ptr, &items_buffer.get()[levels[0]], num_items);
-  // serde call did not throw, repackage with destrtuctors
+  // serde call did not throw, repackage with destructors
   std::unique_ptr<T, items_deleter> items(items_buffer.release(), items_deleter(levels[0], capacity, allocator));
   const size_t delta = ptr - static_cast<const char*>(bytes);
   if (delta != size) throw std::logic_error("deserialized size mismatch: " + std::to_string(delta) + " != " + std::to_string(size));
@@ -592,6 +617,7 @@ kll_sketch<T, C, A> kll_sketch<T, C, A>::deserialize(const void* bytes, size_t s
     min_item.emplace(items.get()[levels[0]]);
     max_item.emplace(items.get()[levels[0]]);
   }
+  validate_items(levels, num_levels, items.get(), min_item, max_item, is_level_zero_sorted, comparator);
   return kll_sketch(k, min_k, n, num_levels, std::move(levels), std::move(items), capacity,
       std::move(min_item), std::move(max_item), is_level_zero_sorted, comparator);
 }
@@ -634,7 +660,8 @@ sorted_view_(nullptr)
 // The following code is only valid in the special case of exactly reaching capacity while updating.
 // It cannot be used while merging, while reducing k, or anything else.
 template<typename T, typename C, typename A>
-void kll_sketch<T, C, A>::compress_while_updating(void) {
+template<typename RandomBitGenerator>
+void kll_sketch<T, C, A>::compress_while_updating(RandomBitGenerator& random_bit_generator) {
   const uint8_t level = find_level_to_compact();
 
   // It is important to add the new top level right here. Be aware that this operation
@@ -661,9 +688,9 @@ void kll_sketch<T, C, A>::compress_while_updating(void) {
     std::sort(items_ + adj_beg, items_ + adj_beg + adj_pop, comparator_);
   }
   if (pop_above == 0) {
-    kll_helper::randomly_halve_up(items_, adj_beg, adj_pop);
+    kll_helper::randomly_halve_up(items_, adj_beg, adj_pop, random_bit_generator);
   } else {
-    kll_helper::randomly_halve_down(items_, adj_beg, adj_pop);
+    kll_helper::randomly_halve_down(items_, adj_beg, adj_pop, random_bit_generator);
     kll_helper::merge_sorted_arrays<T, C>(items_, adj_beg, half_adj_pop, raw_lim, pop_above, adj_beg + half_adj_pop);
   }
   levels_[level + 1] -= half_adj_pop; // adjust boundaries of the level above
@@ -770,8 +797,8 @@ quantiles_sorted_view<T, C, A> kll_sketch<T, C, A>::get_sorted_view() const {
 }
 
 template<typename T, typename C, typename A>
-template<typename O>
-void kll_sketch<T, C, A>::merge_higher_levels(O&& other, uint64_t final_n) {
+template<typename O, typename RandomBitGenerator>
+void kll_sketch<T, C, A>::merge_higher_levels(O&& other, uint64_t final_n, RandomBitGenerator& random_bit_generator) {
   const uint32_t tmp_num_items = get_num_retained() + other.get_num_retained_above_level_zero();
   A alloc(allocator_);
   auto tmp_items_deleter = [tmp_num_items, &alloc](T* ptr) { alloc.deallocate(ptr, tmp_num_items); }; // no destructor needed
@@ -786,7 +813,7 @@ void kll_sketch<T, C, A>::merge_higher_levels(O&& other, uint64_t final_n) {
   populate_work_arrays(std::forward<O>(other), workbuf.get(), worklevels.data(), provisional_num_levels);
 
   const kll_helper::compress_result result = kll_helper::general_compress<T, C>(k_, m_, provisional_num_levels, workbuf.get(),
-      worklevels.data(), outlevels.data(), is_level_zero_sorted_);
+      worklevels.data(), outlevels.data(), is_level_zero_sorted_, random_bit_generator);
 
   // ub can sometimes be much bigger
   if (result.final_num_levels > ub) throw std::logic_error("merge error");
@@ -897,6 +924,86 @@ void kll_sketch<T, C, A>::check_family_id(uint8_t family_id) {
   if (family_id != FAMILY) {
     throw std::invalid_argument("Possible corruption: family mismatch: expected "
         + std::to_string(FAMILY) + ", got " + std::to_string(family_id));
+  }
+}
+
+template<typename T, typename C, typename A>
+void kll_sketch<T, C, A>::check_header(uint8_t preamble_ints, uint8_t serial_version, uint8_t family_id,
+    uint8_t flags_byte, uint16_t k, uint8_t m) {
+  check_m(m);
+  check_preamble_ints(preamble_ints, flags_byte);
+  check_serial_version(serial_version);
+  check_family_id(family_id);
+  if (k < kll_constants::MIN_K || k > kll_constants::MAX_K) {
+    throw std::invalid_argument("Possible corruption: K must be >= " + std::to_string(kll_constants::MIN_K)
+        + " and <= " + std::to_string(kll_constants::MAX_K) + ": " + std::to_string(k));
+  }
+  constexpr uint8_t known_flags = (1 << flags::IS_EMPTY) | (1 << flags::IS_LEVEL_ZERO_SORTED) | (1 << flags::IS_SINGLE_ITEM);
+  if ((flags_byte & ~known_flags) != 0) throw std::invalid_argument("Possible corruption: invalid flags");
+  const bool is_empty = flags_byte & (1 << flags::IS_EMPTY);
+  const bool is_single_item = flags_byte & (1 << flags::IS_SINGLE_ITEM);
+  if (is_empty && is_single_item) throw std::invalid_argument("Possible corruption: empty and single item flags are incompatible");
+  if ((serial_version == SERIAL_VERSION_2) != is_single_item) {
+    throw std::invalid_argument("Possible corruption: serialization version and single item flag mismatch");
+  }
+}
+
+template<typename T, typename C, typename A>
+uint32_t kll_sketch<T, C, A>::validate_levels(uint16_t k, uint8_t m, uint64_t n, uint16_t min_k,
+    uint8_t num_levels, vector_u32& levels) {
+  if (n == 0 || n > kll_constants::MAX_N) {
+    throw std::invalid_argument("Possible corruption: N must be >= 1 and <= " + std::to_string(kll_constants::MAX_N)
+        + ": " + std::to_string(n));
+  }
+  if (min_k < kll_constants::MIN_K || min_k > k) {
+    throw std::invalid_argument("Possible corruption: min K must be between " + std::to_string(kll_constants::MIN_K)
+        + " and K: " + std::to_string(min_k));
+  }
+  const uint8_t max_num_levels = kll_helper::ub_on_num_levels(n);
+  if (num_levels == 0 || num_levels > max_num_levels) {
+    throw std::invalid_argument("Possible corruption: invalid number of levels: " + std::to_string(num_levels));
+  }
+  const uint32_t capacity = kll_helper::compute_total_capacity(k, m, num_levels);
+  uint64_t total_weight = 0;
+  uint64_t weight = 1;
+  for (uint8_t level = 0; level < num_levels; ++level) {
+    if (levels[level] > capacity || (level > 0 && levels[level] < levels[level - 1])) {
+      throw std::invalid_argument("Possible corruption: invalid level boundary");
+    }
+    const uint32_t level_end = level + 1 == num_levels ? capacity : levels[level + 1];
+    if (level_end < levels[level] || level_end > capacity) {
+      throw std::invalid_argument("Possible corruption: invalid level boundary");
+    }
+    const uint64_t population = level_end - levels[level];
+    if (total_weight > n || population > (n - total_weight) / weight) {
+      throw std::invalid_argument("Possible corruption: invalid total weight");
+    }
+    total_weight += population * weight;
+    weight <<= 1;
+  }
+  if (total_weight != n) throw std::invalid_argument("Possible corruption: total weight does not match N");
+  levels[num_levels] = capacity;
+  return capacity;
+}
+
+template<typename T, typename C, typename A>
+void kll_sketch<T, C, A>::validate_items(const vector_u32& levels, uint8_t num_levels, const T* items,
+    const optional<T>& min_item, const optional<T>& max_item, bool is_level_zero_sorted, const C& comparator) {
+  if (!min_item || !max_item || !check_update_item(*min_item) || !check_update_item(*max_item)
+      || comparator(*max_item, *min_item)) {
+    throw std::invalid_argument("Possible corruption: invalid minimum or maximum item");
+  }
+  for (uint8_t level = 0; level < num_levels; ++level) {
+    const T* begin = items + levels[level];
+    const T* end = items + levels[level + 1];
+    if ((level > 0 || is_level_zero_sorted) && !std::is_sorted(begin, end, comparator)) {
+      throw std::invalid_argument("Possible corruption: level must be sorted");
+    }
+    for (const T* item = begin; item != end; ++item) {
+      if (!check_update_item(*item) || comparator(*item, *min_item) || comparator(*max_item, *item)) {
+        throw std::invalid_argument("Possible corruption: retained item outside minimum and maximum range");
+      }
+    }
   }
 }
 

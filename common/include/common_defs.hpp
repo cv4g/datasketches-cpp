@@ -71,7 +71,7 @@ constexpr uint8_t lg_size_from_count(uint32_t n, double load_factor) {
 // stream helpers to hide casts
 template<typename T>
 static inline T read(std::istream& is) {
-  T value;
+  T value{};
   is.read(reinterpret_cast<char*>(&value), sizeof(T));
   return value;
 }
