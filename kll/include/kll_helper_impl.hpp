@@ -36,13 +36,14 @@ bool kll_helper::is_odd(uint32_t value) {
 }
 
 uint8_t kll_helper::floor_of_log2_of_fraction(uint64_t numer, uint64_t denom) {
+  if (denom == 0) throw std::invalid_argument("denom must not be zero");
   if (denom > numer) return 0;
   uint8_t count = 0;
-  while (true) {
+  while (denom <= numer / 2) {
     denom <<= 1;
-    if (denom > numer) return count;
     count++;
   }
+  return count;
 }
 
 uint8_t kll_helper::ub_on_num_levels(uint64_t n) {

@@ -497,6 +497,8 @@ TEST_CASE("kll sketch", "[kll_sketch]") {
 
   SECTION("floor of log2 of fraction") {
     REQUIRE(kll_helper::floor_of_log2_of_fraction(0, 1) == 0);
+    REQUIRE(kll_helper::floor_of_log2_of_fraction(UINT64_MAX, 1) == 63);
+    REQUIRE_THROWS_AS(kll_helper::floor_of_log2_of_fraction(1, 0), std::invalid_argument);
     REQUIRE_THROWS_AS(
         kll_float_sketch::get_max_serialized_size_bytes(200, kll_constants::MAX_N + 1), std::invalid_argument);
     REQUIRE(kll_helper::floor_of_log2_of_fraction(1, 2) == 0);
