@@ -97,12 +97,7 @@ template <typename T, typename RandomBitGenerator>
 void kll_helper::randomly_halve_down(T* buf, uint32_t start, uint32_t length, RandomBitGenerator& random_bit_generator) {
   if (!is_even(length)) { throw std::invalid_argument("length must be even"); }
   const uint32_t half_length = length / 2;
-#ifdef KLL_VALIDATION
-  unused(random_bit_generator);
-  const uint32_t offset = deterministic_offset();
-#else
   const uint32_t offset = random_bit_from(random_bit_generator) ? 1 : 0;
-#endif
   uint32_t j = start + offset;
   for (uint32_t i = start; i < (start + half_length); i++) {
     if (i != j) buf[i] = std::move(buf[j]);
@@ -114,12 +109,7 @@ template <typename T, typename RandomBitGenerator>
 void kll_helper::randomly_halve_up(T* buf, uint32_t start, uint32_t length, RandomBitGenerator& random_bit_generator) {
   if (!is_even(length)) { throw std::invalid_argument("length must be even"); }
   const uint32_t half_length = length / 2;
-#ifdef KLL_VALIDATION
-  unused(random_bit_generator);
-  const uint32_t offset = deterministic_offset();
-#else
   const uint32_t offset = random_bit_from(random_bit_generator) ? 1 : 0;
-#endif
   uint32_t j = (start + length) - 1 - offset;
   for (uint32_t i = (start + length) - 1; i >= (start + half_length); i--) {
     if (i != j) buf[i] = std::move(buf[j]);
@@ -348,14 +338,6 @@ void kll_helper::move_construct(T* src, size_t src_first, size_t src_last, T* ds
     src_first++;
   }
 }
-
-#ifdef KLL_VALIDATION
-uint32_t kll_helper::deterministic_offset() {
-  const uint32_t result(kll_next_offset);
-  kll_next_offset = 1 - kll_next_offset;
-  return result;
-}
-#endif
 
 } /* namespace datasketches */
 

@@ -24,10 +24,6 @@
 
 namespace datasketches {
 
-#ifdef KLL_VALIDATION
-extern uint32_t kll_next_offset;
-#endif
-
 // 0 <= power <= 30
 static const uint64_t powers_of_three[] =  {1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683, 59049, 177147, 531441,
 1594323, 4782969, 14348907, 43046721, 129140163, 387420489, 1162261467,
@@ -108,12 +104,6 @@ class kll_helper {
 
     template<typename T>
     static void move_construct(T* src, size_t src_first, size_t src_last, T* dst, size_t dst_first, bool destroy);
-
-#ifdef KLL_VALIDATION
-  private:
-
-    static inline uint32_t deterministic_offset();
-#endif
 
 };
 

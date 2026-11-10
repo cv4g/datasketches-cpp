@@ -381,10 +381,8 @@ TEST_CASE("kll sketch", "[kll_sketch]") {
 
     REQUIRE(build(1) == build(1));
     REQUIRE(build_weighted(1) == build_weighted(1));
-#ifndef KLL_VALIDATION // validation mode replaces the generator with deterministic offsets
     REQUIRE(build(1) != build(2));
     REQUIRE(build_weighted(1) != build_weighted(2));
-#endif
 
     // a standard engine works directly: a bit is not just whether the 32-bit output is nonzero, which is almost always
     auto build_with_engine = [](uint32_t seed) {
@@ -394,9 +392,7 @@ TEST_CASE("kll sketch", "[kll_sketch]") {
       return sketch.serialize();
     };
     REQUIRE(build_with_engine(1) == build_with_engine(1));
-#ifndef KLL_VALIDATION // validation mode replaces the generator with deterministic offsets
     REQUIRE(build_with_engine(1) != build_with_engine(2));
-#endif
 
     // a weight that is an lvalue of an integral type other than uint64_t is a weight, not a generator
     kll_float_sketch weighted(200, std::less<float>(), 0);
