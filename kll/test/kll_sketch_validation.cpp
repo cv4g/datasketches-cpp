@@ -18,6 +18,7 @@
  */
 
 #include <catch2/catch.hpp>
+#include <limits>
 
 #include <kll_sketch.hpp>
 #include <kll_helper.hpp>
@@ -194,14 +195,14 @@ std::pair<int64_t, uint8_t> hash_samples_and_count_levels(It from, It to) {
   return std::pair<int64_t, uint8_t>(static_cast<int64_t>(accum), num_levels); // accum < 2^60
 }
 
-// Hidden by default because the 114 cases add up to about 91 million updates.
-// Run with: kll_test "[validation]"
-TEST_CASE("kll validation", "[kll_sketch][.validation]") {
+// Checks the reference cases whose stream length n is in [min_n, max_n].
+static void check_reference_cases(unsigned min_n, unsigned max_n) {
   for (unsigned i = 0; i < num_tests; i++) {
     if (correct_results[7 * i] != i) throw std::logic_error("test number mismatch");
     unsigned k = correct_results[7 * i + 1];
     unsigned n = correct_results[7 * i + 2];
     unsigned stride = correct_results[7 * i + 3];
+    if (n < min_n || n > max_n) continue;
     auto input_array = make_input_array(n, stride);
     kll_sketch<float> sketch(k);
     alternating_bit_generator random_bit;
@@ -210,17 +211,26 @@ TEST_CASE("kll validation", "[kll_sketch][.validation]") {
     }
     unsigned num_samples = sketch.get_num_retained();
     auto p = hash_samples_and_count_levels(sketch.begin(), sketch.end());
-    std::cout << i;
+    INFO("reference case " << i << ", n = " << n);
     REQUIRE(correct_results[7 * i + 4] == p.second);
     REQUIRE(correct_results[7 * i + 5] == num_samples);
-    if (correct_results[7 * i + 6] == p.first) {
-      std::cout << " pass" << std::endl;
-    } else {
-      std::cout << " " << (correct_results[7 * i + 6]) << " != " << p.first << "\n";
-      std::cout << sketch.to_string();
-      FAIL();
-    }
+    INFO(sketch.to_string());
+    REQUIRE(correct_results[7 * i + 6] == p.first);
   }
+}
+
+// Streams up to this length run by default: 67 of the 114 cases, about 1% of the updates.
+constexpr unsigned max_default_n = 100000;
+
+TEST_CASE("kll validation: short streams", "[kll_sketch][validation]") {
+  check_reference_cases(0, max_default_n);
+}
+
+// Hidden by default because these 47 cases add up to about 90 million updates.
+// Run all reference cases with: kll_test "[validation]"
+// To run them by default as well, remove the '.' from the tag.
+TEST_CASE("kll validation: long streams", "[kll_sketch][.validation]") {
+  check_reference_cases(max_default_n + 1, std::numeric_limits<unsigned>::max());
 }
 
 TEST_CASE("kll validation: test hash and num levels", "[kll_sketch][validation]") {
