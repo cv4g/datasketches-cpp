@@ -24,10 +24,6 @@
 
 namespace datasketches {
 
-#ifdef KLL_VALIDATION
-extern uint32_t kll_next_offset;
-#endif
-
 // 0 <= power <= 30
 static const uint64_t powers_of_three[] =  {1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683, 59049, 177147, 531441,
 1594323, 4782969, 14348907, 43046721, 129140163, 387420489, 1162261467,
@@ -47,11 +43,11 @@ class kll_helper {
     static inline uint16_t int_cap_aux_aux(uint16_t k, uint8_t depth);
     static inline uint64_t sum_the_sample_weights(uint8_t num_levels, const uint32_t* levels);
 
-    template <typename T>
-    static void randomly_halve_down(T* buf, uint32_t start, uint32_t length);
+    template <typename T, typename RandomBitGenerator>
+    static void randomly_halve_down(T* buf, uint32_t start, uint32_t length, RandomBitGenerator& random_bit_generator);
 
-    template <typename T>
-    static void randomly_halve_up(T* buf, uint32_t start, uint32_t length);
+    template <typename T, typename RandomBitGenerator>
+    static void randomly_halve_up(T* buf, uint32_t start, uint32_t length, RandomBitGenerator& random_bit_generator);
 
     // this version moves objects within the same buffer
     // assumes that destination has initialized objects
@@ -99,21 +95,15 @@ class kll_helper {
     static inline compress_result predict_compress(uint16_t k, uint8_t m, uint8_t num_levels_in,
             const uint32_t* in_levels, uint32_t* level_sizes);
 
-    template <typename T, typename C>
+    template <typename T, typename C, typename RandomBitGenerator>
     static compress_result general_compress(uint16_t k, uint8_t m, uint8_t num_levels_in, T* items,
-            uint32_t* in_levels, uint32_t* out_levels, bool is_level_zero_sorted);
+            uint32_t* in_levels, uint32_t* out_levels, bool is_level_zero_sorted, RandomBitGenerator& random_bit_generator);
 
     template<typename T>
     static void copy_construct(const T* src, size_t src_first, size_t src_last, T* dst, size_t dst_first);
 
     template<typename T>
     static void move_construct(T* src, size_t src_first, size_t src_last, T* dst, size_t dst_first, bool destroy);
-
-#ifdef KLL_VALIDATION
-  private:
-
-    static inline uint32_t deterministic_offset();
-#endif
 
 };
 

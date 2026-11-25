@@ -178,16 +178,22 @@ sorted_view_(nullptr)
 template<typename T, typename C, typename A>
 template<typename FwdT>
 void kll_sketch<T, C, A>::update(FwdT&& item) {
+  update(std::forward<FwdT>(item), random_utils::random_bit);
+}
+
+template<typename T, typename C, typename A>
+template<typename FwdT, typename RandomBitGenerator, typename>
+void kll_sketch<T, C, A>::update(FwdT&& item, RandomBitGenerator& random_bit_generator) {
   if (!check_update_item(item)) { return; }
   allocate_items(); // first, so that a failure leaves the sketch unchanged
   update_min_max(static_cast<const T&>(item)); // min and max are always copies
   if (levels_[0] == 0) {
     // item can refer into items_, and internal_update() can destroy it
     T copy(std::forward<FwdT>(item));
-    const uint32_t index = internal_update();
+    const uint32_t index = internal_update(random_bit_generator);
     new (&items_[index]) T(std::move(copy));
   } else {
-    const uint32_t index = internal_update();
+    const uint32_t index = internal_update(random_bit_generator);
     new (&items_[index]) T(std::forward<FwdT>(item));
   }
   reset_sorted_view();
@@ -196,13 +202,19 @@ void kll_sketch<T, C, A>::update(FwdT&& item) {
 template<typename T, typename C, typename A>
 template<typename FwdT>
 void kll_sketch<T, C, A>::update(FwdT&& item, uint64_t weight) {
+  update(std::forward<FwdT>(item), weight, random_utils::random_bit);
+}
+
+template<typename T, typename C, typename A>
+template<typename FwdT, typename RandomBitGenerator, typename>
+void kll_sketch<T, C, A>::update(FwdT&& item, uint64_t weight, RandomBitGenerator& random_bit_generator) {
   if (!check_update_item(item)) { return; }
   if (weight == 0) throw std::invalid_argument("weight must be at least 1");
   if (weight > kll_constants::MAX_WEIGHT) {
     throw std::invalid_argument("weight must be less than 2^61: " + std::to_string(weight));
   }
   if (weight == 1) {
-    update(std::forward<FwdT>(item));
+    update(std::forward<FwdT>(item), random_bit_generator);
     return;
   }
   allocate_items(); // first, so that a failure leaves the sketch unchanged
@@ -212,12 +224,12 @@ void kll_sketch<T, C, A>::update(FwdT&& item, uint64_t weight) {
     // construct each copy before counting it, so that a failed copy leaves a valid sketch
     for (uint64_t i = 1; i < weight; ++i) {
       new (&items_[levels_[0] - 1]) T(static_cast<const T&>(item));
-      internal_update();
+      internal_update(random_bit_generator);
     }
     new (&items_[levels_[0] - 1]) T(std::forward<FwdT>(item));
-    internal_update();
+    internal_update(random_bit_generator);
   } else {
-    merge(kll_sketch(k_, static_cast<const T&>(item), weight, comparator_, allocator_));
+    merge(kll_sketch(k_, static_cast<const T&>(item), weight, comparator_, allocator_), random_bit_generator);
   }
 }
 
@@ -300,13 +312,14 @@ T* kll_sketch<T, C, A>::item_ptr(uint32_t index) const {
 }
 
 template<typename T, typename C, typename A>
-uint32_t kll_sketch<T, C, A>::internal_update() {
+template<typename RandomBitGenerator>
+uint32_t kll_sketch<T, C, A>::internal_update(RandomBitGenerator& random_bit_generator) {
   allocate_items();
   if (levels_[0] == 0) {
     if (items_size_ < k_) {
       grow_items(std::min<uint32_t>(items_size_ << static_cast<uint8_t>(RESIZE_FACTOR), k_));
     } else {
-      compress_while_updating();
+      compress_while_updating(random_bit_generator);
     }
   }
   n_++;
@@ -317,6 +330,12 @@ uint32_t kll_sketch<T, C, A>::internal_update() {
 template<typename T, typename C, typename A>
 template<typename FwdSk>
 void kll_sketch<T, C, A>::merge(FwdSk&& other) {
+  merge(std::forward<FwdSk>(other), random_utils::random_bit);
+}
+
+template<typename T, typename C, typename A>
+template<typename FwdSk, typename RandomBitGenerator, typename>
+void kll_sketch<T, C, A>::merge(FwdSk&& other, RandomBitGenerator& random_bit_generator) {
   if (this == &other) { throw std::invalid_argument("A sketch cannot merge with itself."); }
   if (other.is_empty()) { return; }
   if (m_ != other.m_) {
@@ -332,10 +351,10 @@ void kll_sketch<T, C, A>::merge(FwdSk&& other) {
   }
   const uint64_t final_n = n_ + other.n_;
   for (uint32_t i = other.levels_[0]; i < other.levels_[1]; i++) {
-    const uint32_t index = internal_update();
+    const uint32_t index = internal_update(random_bit_generator);
     new (&items_[index]) T(conditional_forward<FwdSk>(other.items_[i]));
   }
-  if (other.num_levels_ >= 2) { merge_higher_levels(std::forward<FwdSk>(other), final_n); }
+  if (other.num_levels_ >= 2) { merge_higher_levels(std::forward<FwdSk>(other), final_n, random_bit_generator); }
   n_ = final_n;
   if (other.is_estimation_mode()) { min_k_ = std::min(min_k_, other.min_k_); }
   assert_correct_total_weight();
@@ -770,7 +789,8 @@ sorted_view_(nullptr)
 // The following code is only valid in the special case of exactly reaching capacity while updating.
 // It cannot be used while merging, while reducing k, or anything else.
 template<typename T, typename C, typename A>
-void kll_sketch<T, C, A>::compress_while_updating(void) {
+template<typename RandomBitGenerator>
+void kll_sketch<T, C, A>::compress_while_updating(RandomBitGenerator& random_bit_generator) {
   const uint8_t level = find_level_to_compact();
 
   // It is important to add the new top level right here. Be aware that this operation
@@ -797,9 +817,9 @@ void kll_sketch<T, C, A>::compress_while_updating(void) {
     std::sort(items_ + adj_beg, items_ + adj_beg + adj_pop, comparator_);
   }
   if (pop_above == 0) {
-    kll_helper::randomly_halve_up(items_, adj_beg, adj_pop);
+    kll_helper::randomly_halve_up(items_, adj_beg, adj_pop, random_bit_generator);
   } else {
-    kll_helper::randomly_halve_down(items_, adj_beg, adj_pop);
+    kll_helper::randomly_halve_down(items_, adj_beg, adj_pop, random_bit_generator);
     kll_helper::merge_sorted_arrays<T, C>(items_, adj_beg, half_adj_pop, raw_lim, pop_above, adj_beg + half_adj_pop);
   }
   levels_[level + 1] -= half_adj_pop; // adjust boundaries of the level above
@@ -922,8 +942,8 @@ quantiles_sorted_view<T, C, A> kll_sketch<T, C, A>::get_sorted_view() const {
 }
 
 template<typename T, typename C, typename A>
-template<typename O>
-void kll_sketch<T, C, A>::merge_higher_levels(O&& other, uint64_t final_n) {
+template<typename O, typename RandomBitGenerator>
+void kll_sketch<T, C, A>::merge_higher_levels(O&& other, uint64_t final_n, RandomBitGenerator& random_bit_generator) {
   const uint32_t tmp_num_items = get_num_retained() + other.get_num_retained_above_level_zero();
   A alloc(allocator_);
   auto tmp_items_deleter = [tmp_num_items, &alloc](T* ptr) { alloc.deallocate(ptr, tmp_num_items); }; // no destructor needed
@@ -956,7 +976,7 @@ void kll_sketch<T, C, A>::merge_higher_levels(O&& other, uint64_t final_n) {
   populate_work_arrays(std::forward<O>(other), workbuf.get(), worklevels.data(), provisional_num_levels);
 
   const kll_helper::compress_result result = kll_helper::general_compress<T, C>(k_, m_, provisional_num_levels, workbuf.get(),
-      worklevels.data(), outlevels.data(), is_level_zero_sorted_);
+      worklevels.data(), outlevels.data(), is_level_zero_sorted_, random_bit_generator);
   if (result.final_num_levels != predicted.final_num_levels || result.final_capacity != predicted.final_capacity
       || result.final_num_items != predicted.final_num_items) {
     throw std::logic_error("merge error: compression does not match the prediction");

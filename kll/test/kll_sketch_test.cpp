@@ -19,10 +19,12 @@
 
 #include <catch2/catch.hpp>
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <sstream>
 #include <fstream>
+#include <random>
 #include <stdexcept>
 #include <vector>
 
@@ -44,6 +46,27 @@ static std::string testBinaryInputPath = "test/";
 using kll_float_sketch = kll_sketch<float, std::less<float>, test_allocator<float>>;
 // let std::string use the default allocator for simplicity, otherwise we need to define "less" and "serde"
 using kll_string_sketch = kll_sketch<std::string, std::less<std::string>, test_allocator<std::string>>;
+
+// SplitMix64, a uniform random bit generator over all 64-bit values
+class deterministic_random_bit_generator {
+public:
+  using result_type = uint64_t;
+  static constexpr result_type min() { return 0; }
+  static constexpr result_type max() { return UINT64_MAX; }
+
+  explicit deterministic_random_bit_generator(uint64_t state): state_(state) {}
+
+  result_type operator()() {
+    state_ += UINT64_C(0x9e3779b97f4a7c15);
+    uint64_t value = state_;
+    value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31);
+  }
+
+private:
+  uint64_t state_;
+};
 
 TEST_CASE("kll sketch", "[kll_sketch]") {
 
@@ -336,6 +359,64 @@ TEST_CASE("kll sketch", "[kll_sketch]") {
         }
       }
     }
+  }
+
+  SECTION("caller-owned randomness") {
+    auto build = [](uint64_t seed) {
+      kll_float_sketch sketch(200, std::less<float>(), 0);
+      deterministic_random_bit_generator random_bit(seed);
+      for (uint32_t i = 0; i < 10000; ++i) sketch.update(static_cast<float>(i), random_bit);
+      return sketch.serialize();
+    };
+    // weighted updates use the generator both when the copies fit into level zero and when they are merged
+    auto build_weighted = [](uint64_t seed) {
+      kll_float_sketch sketch(200, std::less<float>(), 0);
+      deterministic_random_bit_generator random_bit(seed);
+      for (uint32_t i = 0; i < 2000; ++i) {
+        const uint64_t weight = (i % 3 == 0) ? 1000 : 7;
+        sketch.update(static_cast<float>(i), weight, random_bit);
+      }
+      return sketch.serialize();
+    };
+
+    REQUIRE(build(1) == build(1));
+    REQUIRE(build_weighted(1) == build_weighted(1));
+    REQUIRE(build(1) != build(2));
+    REQUIRE(build_weighted(1) != build_weighted(2));
+
+    // a standard engine works directly: a bit is not just whether the 32-bit output is nonzero, which is almost always
+    auto build_with_engine = [](uint32_t seed) {
+      kll_float_sketch sketch(200, std::less<float>(), 0);
+      std::mt19937 engine(seed);
+      for (uint32_t i = 0; i < 10000; ++i) sketch.update(static_cast<float>(i), engine);
+      return sketch.serialize();
+    };
+    REQUIRE(build_with_engine(1) == build_with_engine(1));
+    REQUIRE(build_with_engine(1) != build_with_engine(2));
+
+    // a weight that is an lvalue of an integral type other than uint64_t is a weight, not a generator
+    kll_float_sketch weighted(200, std::less<float>(), 0);
+    uint32_t weight = 5;
+    weighted.update(1.0f, weight);
+    REQUIRE(weighted.get_n() == 5);
+
+    kll_float_sketch left(200, std::less<float>(), 0);
+    kll_float_sketch right(200, std::less<float>(), 0);
+    deterministic_random_bit_generator left_random_bit(3);
+    deterministic_random_bit_generator right_random_bit(4);
+    for (uint32_t i = 0; i < 5000; ++i) left.update(static_cast<float>(i), left_random_bit);
+    for (uint32_t i = 5000; i < 10000; ++i) right.update(static_cast<float>(i), right_random_bit);
+
+    kll_float_sketch first_merge(200, std::less<float>(), 0);
+    kll_float_sketch second_merge(200, std::less<float>(), 0);
+    deterministic_random_bit_generator first_merge_random_bit(5);
+    deterministic_random_bit_generator second_merge_random_bit(5);
+    first_merge.merge(left, first_merge_random_bit);
+    first_merge.merge(right, first_merge_random_bit);
+    second_merge.merge(left, second_merge_random_bit);
+    second_merge.merge(right, second_merge_random_bit);
+    REQUIRE(first_merge.serialize() == second_merge.serialize());
+    REQUIRE_THROWS_WITH(first_merge.merge(first_merge, first_merge_random_bit), "A sketch cannot merge with itself.");
   }
 
   SECTION("stream serialize deserialize empty") {

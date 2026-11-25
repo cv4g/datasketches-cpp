@@ -72,6 +72,7 @@ target_sources(common_test
     binomial_bounds_test.cpp
     hash_test.cpp
     serde_test.cpp
+    random_bit_test.cpp
 )
 
 # now the integration test part

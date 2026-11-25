@@ -21,6 +21,7 @@
 #define KLL_SKETCH_HPP_
 
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "common_defs.hpp"
@@ -251,6 +252,19 @@ class kll_sketch {
     void update(FwdT&& item);
 
     /**
+     * Updates this sketch with the given data item using caller-owned randomness.
+     * The generator state is not owned or serialized by the sketch.
+     * The generator is invoked only when a compaction needs a random bit (see random_bit_from()).
+     * @param item from a stream of items
+     * @param random_bit_generator uniform random bit generator, such as std::mt19937_64
+     */
+    // The last template parameter restricts this overload to uniform random bit generators. Otherwise it would be
+    // a better match than update(item, weight) for a weight that is an lvalue of an integral type other than uint64_t.
+    template<typename FwdT, typename RandomBitGenerator,
+        typename = typename std::enable_if<is_uniform_random_bit_generator<RandomBitGenerator>::value>::type>
+    void update(FwdT&& item, RandomBitGenerator& random_bit_generator);
+
+    /**
      * Updates this sketch with the given data item repeated the given number of times.
      * The result is equivalent to calling update(item) weight times, at a cost that grows
      * with the logarithm of the weight rather than with the weight itself.
@@ -265,6 +279,20 @@ class kll_sketch {
     void update(FwdT&& item, uint64_t weight);
 
     /**
+     * Updates this sketch with the given data item repeated the given number of times
+     * using caller-owned randomness.
+     * The generator state is not owned or serialized by the sketch.
+     * The generator is invoked only when a compaction needs a random bit (see random_bit_from()).
+     * @param item from a stream of items
+     * @param weight number of times the item is repeated, from 1 to kll_constants::MAX_WEIGHT (2^61 - 1)
+     * @param random_bit_generator uniform random bit generator, such as std::mt19937_64
+     * @throw std::invalid_argument if the weight is 0 or greater than kll_constants::MAX_WEIGHT
+     */
+    template<typename FwdT, typename RandomBitGenerator,
+        typename = typename std::enable_if<is_uniform_random_bit_generator<RandomBitGenerator>::value>::type>
+    void update(FwdT&& item, uint64_t weight, RandomBitGenerator& random_bit_generator);
+
+    /**
      * Merges another sketch into this one.
      * If sketches contain strings, callers are responsible for ensuring that
      * both sketches were built using compatible string encodings.
@@ -275,6 +303,18 @@ class kll_sketch {
      */
     template<typename FwdSk>
     void merge(FwdSk&& other);
+
+    /**
+     * Merges another sketch into this one using caller-owned randomness.
+     * The generator state is not owned or serialized by the sketch.
+     * The generator is invoked only when a compaction needs a random bit (see random_bit_from()).
+     * If other is this sketch, this throws std::invalid_argument.
+     * @param other sketch to merge into this one
+     * @param random_bit_generator uniform random bit generator, such as std::mt19937_64
+     */
+    template<typename FwdSk, typename RandomBitGenerator,
+        typename = typename std::enable_if<is_uniform_random_bit_generator<RandomBitGenerator>::value>::type>
+    void merge(FwdSk&& other, RandomBitGenerator& random_bit_generator);
 
     /**
      * Allocates storage for k items now, rather than on the first update or merge,
@@ -632,18 +672,21 @@ class kll_sketch {
     template<typename O> void copy_items(const O& other);
     // &items_[index], or nullptr without item storage, which makes every item range empty
     inline T* item_ptr(uint32_t index) const;
-    inline uint32_t internal_update();
+    template<typename RandomBitGenerator>
+    inline uint32_t internal_update(RandomBitGenerator& random_bit_generator);
 
     // The following code is only valid in the special case of exactly reaching capacity while updating.
     // It cannot be used while merging, while reducing k, or anything else.
-    void compress_while_updating(void);
+    template<typename RandomBitGenerator>
+    void compress_while_updating(RandomBitGenerator& random_bit_generator);
 
     uint8_t find_level_to_compact() const;
     void add_empty_top_level_to_completely_full_sketch();
     void grow_items(uint32_t new_size); // only while there is one level
     void sort_level_zero();
 
-    template<typename O> void merge_higher_levels(O&& other, uint64_t final_n);
+    template<typename O, typename RandomBitGenerator>
+    void merge_higher_levels(O&& other, uint64_t final_n, RandomBitGenerator& random_bit_generator);
 
     template<typename FwdSk>
     void populate_work_arrays(FwdSk&& other, T* workbuf, uint32_t* worklevels, uint8_t provisional_num_levels);

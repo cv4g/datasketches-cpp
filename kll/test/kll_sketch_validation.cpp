@@ -18,19 +18,32 @@
  */
 
 #include <catch2/catch.hpp>
+#include <limits>
 
 #include <kll_sketch.hpp>
 #include <kll_helper.hpp>
 
-#ifdef KLL_VALIDATION
-
 // This is to make sure the implementation matches exactly the reference implementation in OCaml.
-// Conditional compilation is used because the implementation needs
-// to switch from random choice to deterministic
+// The expected results were produced with compaction offsets alternating 0, 1, 0, ...
+// starting from 0 for each sketch, so the sketch is updated with a generator that reproduces that sequence.
 
 namespace datasketches {
 
-uint32_t kll_next_offset; // to make kll_sketch deterministic
+class alternating_bit_generator {
+public:
+  using result_type = uint32_t;
+  static constexpr result_type min() { return 0; }
+  static constexpr result_type max() { return 1; }
+
+  result_type operator()() {
+    const result_type result = next_;
+    next_ ^= 1;
+    return result;
+  }
+
+private:
+  result_type next_ = 0;
+};
 
 constexpr unsigned num_tests = 114;
 
@@ -166,49 +179,61 @@ static std::vector<int> make_input_array(unsigned n, unsigned stride) {
 
 template<typename It>
 std::pair<int64_t, uint8_t> hash_samples_and_count_levels(It from, It to) {
-  int64_t multiplier = 738219921; // an arbitrary odd 30-bit number
-  int64_t mask60 = (1ULL << 60) - 1ULL;
-  int64_t accum = 0;
+  // unsigned arithmetic wraps around instead of overflowing; the result is the same bit pattern
+  const uint64_t multiplier = 738219921; // an arbitrary odd 30-bit number
+  const uint64_t mask60 = (1ULL << 60) - 1ULL;
+  uint64_t accum = 0;
   uint8_t num_levels = 1;
   for (auto it = from; it != to; ++it) {
-    accum += static_cast<int64_t>((*it).first);
+    accum += static_cast<uint64_t>(static_cast<int64_t>((*it).first));
     accum *= multiplier;
     accum &= mask60;
     accum ^= accum >> 30;
     const uint8_t level = count_trailing_zeros_in_u64((*it).second);
     if (num_levels <= level) num_levels = level + 1;
   }
-  return std::pair<uint64_t, uint8_t>(accum, num_levels);
+  return std::pair<int64_t, uint8_t>(static_cast<int64_t>(accum), num_levels); // accum < 2^60
 }
 
-TEST_CASE("kll validation", "[kll_sketch][validation]") {
+// Checks the reference cases whose stream length n is in [min_n, max_n].
+static void check_reference_cases(unsigned min_n, unsigned max_n) {
   for (unsigned i = 0; i < num_tests; i++) {
     if (correct_results[7 * i] != i) throw std::logic_error("test number mismatch");
     unsigned k = correct_results[7 * i + 1];
     unsigned n = correct_results[7 * i + 2];
     unsigned stride = correct_results[7 * i + 3];
+    if (n < min_n || n > max_n) continue;
     auto input_array = make_input_array(n, stride);
     kll_sketch<float> sketch(k);
-    kll_next_offset = 0;
+    alternating_bit_generator random_bit;
     for (unsigned j = 0; j < n; j++) {
-      sketch.update(input_array[j]);
+      sketch.update(input_array[j], random_bit);
     }
     unsigned num_samples = sketch.get_num_retained();
     auto p = hash_samples_and_count_levels(sketch.begin(), sketch.end());
-    std::cout << i;
+    INFO("reference case " << i << ", n = " << n);
     REQUIRE(correct_results[7 * i + 4] == p.second);
     REQUIRE(correct_results[7 * i + 5] == num_samples);
-    if (correct_results[7 * i + 6] == p.first) {
-      std::cout << " pass" << std::endl;
-    } else {
-      std::cout << " " << (correct_results[7 * i + 6]) << " != " << p.first << "\n";
-      std::cout << sketch.to_string();
-      FAIL();
-    }
+    INFO(sketch.to_string());
+    REQUIRE(correct_results[7 * i + 6] == p.first);
   }
 }
 
-TEST_CASE("kll validation: test hash and num levels", "[kll_sketch][validaiton]") {
+// Streams up to this length run by default: 67 of the 114 cases, about 1% of the updates.
+constexpr unsigned max_default_n = 100000;
+
+TEST_CASE("kll validation: short streams", "[kll_sketch][validation]") {
+  check_reference_cases(0, max_default_n);
+}
+
+// Hidden by default because these 47 cases add up to about 90 million updates.
+// Run all reference cases with: kll_test "[validation]"
+// To run them by default as well, remove the '.' from the tag.
+TEST_CASE("kll validation: long streams", "[kll_sketch][.validation]") {
+  check_reference_cases(max_default_n + 1, std::numeric_limits<unsigned>::max());
+}
+
+TEST_CASE("kll validation: test hash and num levels", "[kll_sketch][validation]") {
   std::pair<float, uint64_t> array[] = {
     std::make_pair(907500, 1),
     std::make_pair(944104, 1),
@@ -223,7 +248,7 @@ TEST_CASE("kll validation: test hash and num levels", "[kll_sketch][validaiton]"
   REQUIRE(hash_and_num_levels.second == 3);
 }
 
-TEST_CASE("kll validation: make input array", "[kll_sketch][validaiton]") {
+TEST_CASE("kll validation: make input array", "[kll_sketch][validation]") {
   int expected_array[6] = { 3654721, 7309442, 2575555, 6230276, 1496389, 5151110 };
   auto array(make_input_array(6, 3654721));
   REQUIRE(array[0] == expected_array[0]);
@@ -235,5 +260,3 @@ TEST_CASE("kll validation: make input array", "[kll_sketch][validaiton]") {
 }
 
 } /* namespace datasketches */
-
-#endif
